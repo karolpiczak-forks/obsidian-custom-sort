@@ -1,3 +1,11 @@
+
+## Install
+
+- `npm run build`
+- copy `main.js`, `manifest.json`
+
+# Overview
+
 Obsidian versions compatibility info: [here](README-obsidian-versions-compatibility.md)
 
 > > This is a simple version of README which highlights the **basic scenario and most commonly used feature**
