@@ -78,9 +78,14 @@ type MonkeyAroundUninstaller = () => void
 
 type ContextMenuProvider = (item: MenuItem) => void
 
-enum FileExplorerStateError {
-	DoesNotExist,
+enum FileExplorerState {
+	DoesNotExist = 1,
 	DeferredView
+}
+
+interface FileExplorerStateError {
+	state: FileExplorerState
+	fileExplorerInDeferredState?: FileExplorerLeaf
 }
 
 type FileExplorerLeafOrError = ValueOrError<FileExplorerLeaf,FileExplorerStateError>
@@ -95,6 +100,8 @@ export default class CustomSortPlugin
 
 	sortSpecCache?: SortSpecsCollection | null
 	customSortAppliedAtLeastOnce: boolean = false
+
+	uninstallerOfFileExplorerPatch: MonkeyAroundUninstaller|undefined = undefined
 
 	showNotice(message: string, timeout?: number) {
 		if (this.settings.notificationsEnabled || (Platform.isMobile && this.settings.mobileNotificationsEnabled)) {
@@ -188,20 +195,25 @@ export default class CustomSortPlugin
 
 		if (fileExplorer) {
 			if (fileExplorer.isDeferred) {
-				return fileExplorerOrError.setError(FileExplorerStateError.DeferredView)
+				return fileExplorerOrError.setError({
+					state: FileExplorerState.DeferredView,
+					fileExplorerInDeferredState: fileExplorer
+				})
 			} else {
 				return fileExplorerOrError.setValue(fileExplorer)
 			}
 		} else {
-			return fileExplorerOrError.setError(FileExplorerStateError.DoesNotExist)
+			return fileExplorerOrError.setError({
+				state: FileExplorerState.DoesNotExist
+			})
 		}
 	}
 
 	checkFileExplorerIsAvailableAndPatchable(logWarning: boolean = true): FileExplorerLeafOrError {
 		let fileExplorerOrError = this.getFileExplorer()
-		if (fileExplorerOrError.e === FileExplorerStateError.DeferredView) {
+		if (fileExplorerOrError.e && fileExplorerOrError.e.state === FileExplorerState.DeferredView) {
 			if (logWarning) {
-				this.logWarningFileExplorerDeferred()
+				this.logDeferredFileExplorerInfo()
 			}
 			return fileExplorerOrError
 		}
@@ -221,21 +233,12 @@ export default class CustomSortPlugin
 	// For the idea of monkey-patching credits go to https://github.com/nothingislost/obsidian-bartender
 	patchFileExplorer(patchableFileExplorer: FileExplorerLeaf): FileExplorerLeaf|undefined {
 		let plugin = this;
-		const requestStandardObsidianSortAfter = (patchUninstaller: MonkeyAroundUninstaller|undefined) => {
-			return () => {
-				if (patchUninstaller) patchUninstaller()
-
-				const fileExplorerOrError= this.checkFileExplorerIsAvailableAndPatchable()
-				if (fileExplorerOrError.v && fileExplorerOrError.v.view) {
-					fileExplorerOrError.v.view.requestSort?.()
-				}
-			}
-		}
 
 		// patching file explorer might fail here because of various non-error reasons.
 		// That's why not showing and not logging error message here
 		if (patchableFileExplorer) {
-			const uninstallerOfFolderSortFunctionWrapper: MonkeyAroundUninstaller = around(patchableFileExplorer.view.constructor.prototype, {
+			this.uninstallFileExplorerPatchIfInstalled()
+			this.uninstallerOfFileExplorerPatch = around(patchableFileExplorer.view.constructor.prototype, {
 				getSortedFolderItems(old: any) {
 					return function (...args: any[]) {
 						// quick check for plugin status
@@ -262,16 +265,20 @@ export default class CustomSortPlugin
 					};
 				}
 			})
-			this.register(requestStandardObsidianSortAfter(uninstallerOfFolderSortFunctionWrapper))
 			return patchableFileExplorer
 		} else {
 			return undefined
 		}
 	}
 
-	logWarningFileExplorerDeferred() {
-		const msg = `${PLUGIN_ID} v${this.manifest.version}: failed to get active File Explorer view.\n`
+	logDeferredFileExplorerInfo() {
+		const msg = `${PLUGIN_ID} v${this.manifest.version}: File Explorer is not displayed yet (Obsidian deferred view detected).\n`
 			+ `Until the File Explorer is visible, the custom-sort plugin cannot apply the custom order.\n`
+		console.warn(msg)
+	}
+
+	logDeferredFileExplorerWatcherSetupInfo() {
+		const msg = `${PLUGIN_ID} v${this.manifest.version}: A watcher was set up to apply custom sort automatically when the File Explorer is displayed.\n`
 		console.warn(msg)
 	}
 
@@ -363,6 +370,8 @@ export default class CustomSortPlugin
 		this.registerEventHandlers()
 
 		this.registerCommands()
+
+		this.registerPluginUnloadHandler()
 
 		this.initialize();
 	}
@@ -561,6 +570,31 @@ export default class CustomSortPlugin
 		})
 	}
 
+	uninstallFileExplorerPatchIfInstalled() {
+		if (this.uninstallerOfFileExplorerPatch) {
+			try {
+				this.uninstallerOfFileExplorerPatch()
+			} catch {
+
+			}
+			this.uninstallerOfFileExplorerPatch = undefined
+		}
+	}
+
+	registerPluginUnloadHandler() {
+		let plugin = this;
+
+		this.register(() => {
+			plugin.uninstallFileExplorerPatchIfInstalled()
+
+			// Request standard File Explorer sorting to remove any custom sorting cached by File Explorer
+			const fileExplorerOrError= plugin.checkFileExplorerIsAvailableAndPatchable()
+			if (fileExplorerOrError.v && fileExplorerOrError.v.view) {
+				fileExplorerOrError.v.view.requestSort?.()
+			}
+		})
+	}
+
 	registerCommands() {
 		const plugin: CustomSortPlugin = this
 		this.addCommand({
@@ -583,7 +617,7 @@ export default class CustomSortPlugin
 		const plugin = this
 		this.app.workspace.onLayoutReady(() => {
 			setTimeout(() => {
-				plugin.initialDelayedApplicationOfCustomSorting.apply(this)
+				plugin.delayedApplicationOfCustomSorting.apply(this)
 			},
 			plugin.settings.delayForInitialApplication)
 		})
@@ -682,7 +716,41 @@ export default class CustomSortPlugin
 		return false
 	}
 
-	initialDelayedApplicationOfCustomSorting() {
+	setWatcherForDelayedFileExplorerView(fileExplorerInDeferredState?: FileExplorerLeaf) {
+		const self = this
+
+		let workspaceLeafContentElementParentToObserve: HTMLElement|Element|null|undefined = fileExplorerInDeferredState?.view?.containerEl?.parentElement
+		if (!workspaceLeafContentElementParentToObserve) {
+			// Fallback for the case when DOM is not available for deferred file explorer
+			// (did not happen in practice, but just in case)
+			workspaceLeafContentElementParentToObserve = document.querySelector(".workspace");
+		}
+		if (workspaceLeafContentElementParentToObserve) {
+			// Syntax sugar to satisfy the strict TypeScript compiler
+			const fileExplorerParentElement = workspaceLeafContentElementParentToObserve
+			const fullyFledgedFileExplorerElementSelector=
+					() => fileExplorerParentElement.querySelector('[data-type="file-explorer"] .nav-files-container');
+
+			const mutationObserver = new MutationObserver((_, observerInstance) => {
+				const fullyFledgedFileExplorerElement = fullyFledgedFileExplorerElementSelector();
+				if (fullyFledgedFileExplorerElement) {
+					observerInstance.disconnect();
+					self.delayedApplicationOfCustomSorting(self.FROM_DOM_WATCHER)
+				}
+			});
+
+			mutationObserver.observe(workspaceLeafContentElementParentToObserve, {
+				childList: true,
+				subtree: false
+			});
+		}
+	}
+
+	// Entering this method for the first time after initial delay after plugin loaded (via setTimeout()),
+	// and if first attempt is unsuccessful, then entering this method again from DOM watcher, when
+	// the File Explorer view gets transformed from delayed view into fully-fledged active view
+	FROM_DOM_WATCHER: boolean = true
+	delayedApplicationOfCustomSorting(fromDOMwatcher?: boolean) {
 		if (!this?.isThePluginStillInstalledAndEnabled()) {
 			console.log(`${PLUGIN_ID} v${this.manifest.version} - delayed handler skipped, plugin no longer active.`)
 			return
@@ -695,7 +763,25 @@ export default class CustomSortPlugin
 			return
 		}
 
-		this.switchPluginStateTo(true)
+		if (!fromDOMwatcher) {
+			// Only for the first delayed invocation:
+			// If file explorer is delayed, configure the watcher
+			// NOTE: Do not configure the watcher if the file explorer is not available
+			let fileExplorerOrError: FileExplorerLeafOrError = this.checkFileExplorerIsAvailableAndPatchable()
+			if (fileExplorerOrError.e && fileExplorerOrError.e.state === FileExplorerState.DeferredView) {
+				this.logDeferredFileExplorerWatcherSetupInfo()
+				this.setWatcherForDelayedFileExplorerView(fileExplorerOrError.e.fileExplorerInDeferredState)
+			} else if (fileExplorerOrError.e) {
+				// file explorer other error - does not exist
+				// force the plugin switch state to report error and show the error icon
+				this.switchPluginStateTo(true)
+			}
+			else { // file explorer is available
+				this.switchPluginStateTo(true)
+			}
+		} else {
+			this.switchPluginStateTo(true)
+		}
 	}
 
 	setRibbonIconToEnabled() {
