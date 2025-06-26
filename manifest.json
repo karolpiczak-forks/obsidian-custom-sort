@@ -1,6 +1,6 @@
 {
-	"id": "custom-sort",
-	"name": "Custom File Explorer sorting",
+	"id": "kpfork-custom-sort",
+	"name": "[R]: Custom File Explorer sorting",
 	"version": "3.1.5",
 	"minAppVersion": "1.7.2",
 	"description": "Allows for manual and automatic, config-driven reordering and sorting of files and folders in File Explorer",
