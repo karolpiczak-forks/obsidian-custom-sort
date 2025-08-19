@@ -1,4 +1,4 @@
-import {
+PLUGIN_IDimport {
 	App,
 	CommunityPlugin,
 	FileExplorerLeaf,
@@ -66,7 +66,7 @@ import {
 } from "./settings";
 import {CustomSortPluginAPI} from "./custom-sort-plugin";
 
-const PLUGIN_ID = 'custom-sort' // same as in manifest.json
+const PLUGIN_ID = 'kpfork-custom-sort' // same as in manifest.json
 
 const SORTSPEC_FILE_NAME: string = 'sortspec.md'
 const SORTINGSPEC_YAML_KEY: string = 'sorting-spec'
