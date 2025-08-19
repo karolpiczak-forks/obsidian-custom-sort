@@ -1,4 +1,4 @@
-PLUGIN_IDimport {
+import {
 	App,
 	CommunityPlugin,
 	FileExplorerLeaf,
